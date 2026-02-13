@@ -1,0 +1,24 @@
+# 目标世界名
+world: world
+
+# 随机坐标范围（±range）
+range: 10000
+
+# 传送池目标数量（ready + pending + inflight）
+pool-target: 30
+
+# 每个候选点预生成半径（单位：chunk）
+pregen-radius-chunks: 10
+
+# Chunky 形状与遍历模式
+shape: circle
+pattern: concentric
+
+# 轮询间隔（tick）
+tick-interval: 40
+
+# TPS 低于此值暂停生成
+tps-pause: 18.0
+
+# TPS 恢复到此值继续生成
+tps-resume: 20.0

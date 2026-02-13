@@ -1,0 +1,13 @@
+name: BlockRacingChunky
+version: 0.1.4
+main: com.xjw.blockracing.chunky.BlockRacingChunkyPlugin
+api-version: 1.21.11
+softdepend: [ Chunky, BlockRacing, BlockRacingPlus ]
+commands:
+  brc:
+    usage: "/brc <status|pause|resume|start|reload|about>"
+    description: "BlockRacing Chunky controller."
+    permission: blockracingchunky.admin
+permissions:
+  blockracingchunky.admin:
+    default: op
