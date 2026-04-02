@@ -20,6 +20,7 @@ import org.bukkit.scheduler.BukkitTask;
 import com.xjw.blockracing.chunky.commands.PoolCommand;
 
 import top.lqsnow.blockracing.Main;
+import top.lqsnow.blockracing.api.BlockRacingAPI;
 import top.lqsnow.blockracing.managers.Game;
 
 public class BlockRacingChunkyPlugin extends JavaPlugin {
@@ -88,21 +89,35 @@ public class BlockRacingChunkyPlugin extends JavaPlugin {
             return;
         }
 
+        // 检查游戏是否已开始，如果未开始则不受TPS限制
+        boolean gameStarted = BlockRacingAPI.isGameStarted();
+        
         double tps = getTps();
         double pauseAt = getConfig().getDouble("tps-pause", 18.0);
         double resumeAt = getConfig().getDouble("tps-resume", 20.0);
-        if (tps < pauseAt) {
-            if (!pausedByTps && isAnyRunning(worldName, netherWorldName)) {
-                pauseManagedTasks(worldName, netherWorldName);
-                pausedByTps = true;
-                getLogger().info(String.format("Chunky paused (tps=%.2f < %.2f)", tps, pauseAt));
+        
+        // 游戏未开始时，不受TPS限制，忽略暂停机制
+        if (!gameStarted) {
+            // 游戏未开始，恢复所有任务（如果被TPS暂停过）
+            if (pausedByTps) {
+                resumeManagedTasks(worldName, netherWorldName);
+                pausedByTps = false;
             }
-            return;
-        }
-        if (pausedByTps && tps >= resumeAt) {
-            resumeManagedTasks(worldName, netherWorldName);
-            pausedByTps = false;
-            getLogger().info(String.format("Chunky resumed (tps=%.2f >= %.2f)", tps, resumeAt));
+        } else {
+            // 游戏已开始，应用TPS限制
+            if (tps < pauseAt) {
+                if (!pausedByTps && isAnyRunning(worldName, netherWorldName)) {
+                    pauseManagedTasks(worldName, netherWorldName);
+                    pausedByTps = true;
+                    getLogger().info(String.format("Chunky paused (tps=%.2f < %.2f)", tps, pauseAt));
+                }
+                return;
+            }
+            if (pausedByTps && tps >= resumeAt) {
+                resumeManagedTasks(worldName, netherWorldName);
+                pausedByTps = false;
+                getLogger().info(String.format("Chunky resumed (tps=%.2f >= %.2f)", tps, resumeAt));
+            }
         }
 
         int target = Math.max(0, getConfig().getInt("pool-target", 30));
@@ -183,7 +198,14 @@ public class BlockRacingChunkyPlugin extends JavaPlugin {
             if (world != null) {
                 Location loc = world.getHighestBlockAt(done.x, done.z).getLocation();
                 loc.setY(loc.getY() + 1);
-                Game.addRandomTeleportCandidate(loc);
+                // 检查该位置是否为海洋群系，只有非海洋位置才添加到随机传送池
+                if (!BlockRacingAPI.isOceanLocation(loc)) {
+                    Game.addRandomTeleportCandidate(loc);
+                } else {
+                    getLogger().info(String.format(
+                            "Chunky done but location is ocean: world=%s x=%d z=%d, skipped",
+                            worldName, done.x, done.z));
+                }
             }
         }
         getLogger().info(String.format(
