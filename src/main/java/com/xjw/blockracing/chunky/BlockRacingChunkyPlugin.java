@@ -4,8 +4,10 @@ import java.lang.reflect.Method;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.function.Consumer;
 
 import org.bukkit.Bukkit;
@@ -24,7 +26,7 @@ public class BlockRacingChunkyPlugin extends JavaPlugin {
     private Main blockRacing;
     private ChunkyBridge chunky;
     private final Deque<Candidate> pending = new ArrayDeque<>();
-    private Candidate inflight;
+    private InflightGroup inflight;
     private BukkitTask task;
     private final Random random = new Random();
     private boolean pausedByTps;
@@ -80,6 +82,7 @@ public class BlockRacingChunkyPlugin extends JavaPlugin {
             return;
         }
         String worldName = getConfig().getString("world", "world");
+        String netherWorldName = getNetherWorldName(worldName);
         World world = Bukkit.getWorld(worldName);
         if (world == null) {
             return;
@@ -89,17 +92,15 @@ public class BlockRacingChunkyPlugin extends JavaPlugin {
         double pauseAt = getConfig().getDouble("tps-pause", 18.0);
         double resumeAt = getConfig().getDouble("tps-resume", 20.0);
         if (tps < pauseAt) {
-            if (!pausedByTps && chunky.isRunning(worldName)) {
-                chunky.pauseTask(worldName);
+            if (!pausedByTps && isAnyRunning(worldName, netherWorldName)) {
+                pauseManagedTasks(worldName, netherWorldName);
                 pausedByTps = true;
                 getLogger().info(String.format("Chunky paused (tps=%.2f < %.2f)", tps, pauseAt));
             }
             return;
         }
         if (pausedByTps && tps >= resumeAt) {
-            if (!chunky.isRunning(worldName)) {
-                chunky.continueTask(worldName);
-            }
+            resumeManagedTasks(worldName, netherWorldName);
             pausedByTps = false;
             getLogger().info(String.format("Chunky resumed (tps=%.2f >= %.2f)", tps, resumeAt));
         }
@@ -113,26 +114,44 @@ public class BlockRacingChunkyPlugin extends JavaPlugin {
             pending.add(new Candidate(rand(range), rand(range)));
         }
 
-        if (inflight == null && !pending.isEmpty() && !chunky.isRunning(worldName)) {
+        if (inflight == null && !pending.isEmpty() && !isAnyRunning(worldName, netherWorldName)) {
             Candidate next = pending.pollFirst();
             if (next != null) {
-                startGeneration(worldName, next);
+                startGeneration(worldName, netherWorldName, next);
             }
         }
     }
 
-    private boolean startGeneration(String worldName, Candidate candidate) {
+    private boolean startGeneration(String worldName, String netherWorldName, Candidate candidate) {
         int radiusChunks = Math.max(1, getConfig().getInt("pregen-radius-chunks", 10));
         int radiusBlocks = radiusChunks * 16;
         String shape = getConfig().getString("shape", "circle");
         String pattern = getConfig().getString("pattern", "concentric");
-        boolean started = chunky.startTask(worldName, shape, candidate.x, candidate.z, radiusBlocks, radiusBlocks, pattern);
-        if (started) {
-            inflight = candidate;
-            active.put(worldName, new ActiveTask(candidate, radiusChunks, System.currentTimeMillis()));
-            getLogger().info(String.format("Chunky start: world=%s x=%d z=%d radius=%dc", worldName, candidate.x, candidate.z, radiusChunks));
+        boolean startedOverworld = chunky.startTask(worldName, shape, candidate.x, candidate.z, radiusBlocks, radiusBlocks, pattern);
+        if (!startedOverworld) {
+            return false;
         }
-        return started;
+
+        InflightGroup group = new InflightGroup(candidate);
+        inflight = group;
+        active.put(worldName, new ActiveTask(group, candidate, worldName, radiusChunks, System.currentTimeMillis(), false));
+        group.startedWorlds.add(worldName);
+        getLogger().info(String.format("Chunky start: world=%s x=%d z=%d radius=%dc", worldName, candidate.x, candidate.z, radiusChunks));
+
+        World netherWorld = netherWorldName != null ? Bukkit.getWorld(netherWorldName) : null;
+        if (netherWorld != null && !netherWorldName.equals(worldName)) {
+            int nx = Math.floorDiv(candidate.x, 8);
+            int nz = Math.floorDiv(candidate.z, 8);
+            boolean startedNether = chunky.startTask(netherWorldName, shape, nx, nz, radiusBlocks, radiusBlocks, pattern);
+            if (startedNether) {
+                active.put(netherWorldName, new ActiveTask(group, candidate, netherWorldName, radiusChunks, System.currentTimeMillis(), true));
+                group.startedWorlds.add(netherWorldName);
+                getLogger().info(String.format("Chunky start: world=%s x=%d z=%d radius=%dc (mapped /8)", netherWorldName, nx, nz, radiusChunks));
+            } else {
+                getLogger().warning(String.format("Chunky nether task start failed: world=%s x=%d z=%d", netherWorldName, nx, nz));
+            }
+        }
+        return true;
     }
 
     private void handleCompleteEvent(Object event) {
@@ -141,15 +160,25 @@ public class BlockRacingChunkyPlugin extends JavaPlugin {
             return;
         }
         ActiveTask taskInfo = active.remove(worldName);
-        Candidate done = taskInfo != null ? taskInfo.candidate : inflight;
-        inflight = null;
+        if (taskInfo == null) {
+            return;
+        }
+
+        Candidate done = taskInfo.candidate;
+        if (taskInfo.group != null) {
+            taskInfo.group.startedWorlds.remove(worldName);
+            if (taskInfo.group.startedWorlds.isEmpty()) {
+                inflight = null;
+            }
+        }
+
         long elapsedMs = taskInfo != null ? (System.currentTimeMillis() - taskInfo.startMs) : 0L;
         double seconds = elapsedMs > 0 ? elapsedMs / 1000.0 : 0.0;
         double lastRate = taskInfo != null ? taskInfo.lastRate : 0.0;
         long lastChunks = taskInfo != null ? taskInfo.lastChunks : 0L;
         double avg = (seconds > 0 && lastChunks > 0) ? (lastChunks / seconds) : 0.0;
 
-        if (done != null) {
+        if (done != null && !taskInfo.isNether) {
             World world = Bukkit.getWorld(worldName);
             if (world != null) {
                 Location loc = world.getHighestBlockAt(done.x, done.z).getLocation();
@@ -203,23 +232,22 @@ public class BlockRacingChunkyPlugin extends JavaPlugin {
 
     public boolean isRunning() {
         String worldName = getConfig().getString("world", "world");
-        return chunky != null && chunky.isReady() && chunky.isRunning(worldName);
+        String netherWorldName = getNetherWorldName(worldName);
+        return chunky != null && chunky.isReady() && isAnyRunning(worldName, netherWorldName);
     }
 
     public void pauseManual() {
         manualPaused = true;
         String worldName = getConfig().getString("world", "world");
-        if (chunky != null && chunky.isReady()) {
-            chunky.pauseTask(worldName);
-        }
+        String netherWorldName = getNetherWorldName(worldName);
+        pauseManagedTasks(worldName, netherWorldName);
     }
 
     public void resumeManual() {
         manualPaused = false;
         String worldName = getConfig().getString("world", "world");
-        if (chunky != null && chunky.isReady()) {
-            chunky.continueTask(worldName);
-        }
+        String netherWorldName = getNetherWorldName(worldName);
+        resumeManagedTasks(worldName, netherWorldName);
         tick();
     }
 
@@ -242,16 +270,64 @@ public class BlockRacingChunkyPlugin extends JavaPlugin {
     }
 
     private static final class ActiveTask {
+        final InflightGroup group;
         final Candidate candidate;
+        final String worldName;
         final int radiusChunks;
         final long startMs;
+        final boolean isNether;
         long lastChunks;
         double lastRate;
 
-        ActiveTask(Candidate candidate, int radiusChunks, long startMs) {
+        ActiveTask(InflightGroup group, Candidate candidate, String worldName, int radiusChunks, long startMs, boolean isNether) {
+            this.group = group;
             this.candidate = candidate;
+            this.worldName = worldName;
             this.radiusChunks = radiusChunks;
             this.startMs = startMs;
+            this.isNether = isNether;
+        }
+    }
+
+    private static final class InflightGroup {
+        final Candidate candidate;
+        final Set<String> startedWorlds = new HashSet<>();
+
+        InflightGroup(Candidate candidate) {
+            this.candidate = candidate;
+        }
+    }
+
+    private String getNetherWorldName(String worldName) {
+        return getConfig().getString("nether-world", worldName + "_nether");
+    }
+
+    private boolean isAnyRunning(String worldName, String netherWorldName) {
+        if (chunky == null || !chunky.isReady()) {
+            return false;
+        }
+        boolean overworldRunning = chunky.isRunning(worldName);
+        boolean netherRunning = netherWorldName != null && !netherWorldName.equals(worldName) && chunky.isRunning(netherWorldName);
+        return overworldRunning || netherRunning;
+    }
+
+    private void pauseManagedTasks(String worldName, String netherWorldName) {
+        if (chunky == null || !chunky.isReady()) {
+            return;
+        }
+        chunky.pauseTask(worldName);
+        if (netherWorldName != null && !netherWorldName.equals(worldName)) {
+            chunky.pauseTask(netherWorldName);
+        }
+    }
+
+    private void resumeManagedTasks(String worldName, String netherWorldName) {
+        if (chunky == null || !chunky.isReady()) {
+            return;
+        }
+        chunky.continueTask(worldName);
+        if (netherWorldName != null && !netherWorldName.equals(worldName)) {
+            chunky.continueTask(netherWorldName);
         }
     }
 

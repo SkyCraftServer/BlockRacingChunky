@@ -1,6 +1,9 @@
 # 目标世界名
 world: world
 
+# 下界世界名（候选点坐标会按 /8 映射）
+nether-world: world_nether
+
 # 随机坐标范围（±range）
 range: 10000
 
