@@ -29,9 +29,7 @@
         <dependency>
             <groupId>lq.snow</groupId>
             <artifactId>BlockRacing</artifactId>
-            <version>3.5</version>
-            <scope>system</scope>
-            <systemPath>${project.basedir}/deps/BlockRacing-3.5.jar</systemPath>
+            <version>3.6</version>
         </dependency>
     </dependencies>
 </project>
